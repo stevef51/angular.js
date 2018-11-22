@@ -1,37 +1,38 @@
-"use strict";
+'use strict';
 
 var path = require('canonical-path');
 var packagePath = __dirname;
 
 var Package = require('dgeni').Package;
 
-// Create and export a new Dgeni package called dgeni-example. This package depends upon
-// the jsdoc and nunjucks packages defined in the dgeni-packages npm module.
+// Create and export a new Dgeni package called angularjs. This package depends upon
+// the ngdoc, nunjucks, and examples packages defined in the dgeni-packages node module.
 module.exports = new Package('angularjs', [
   require('dgeni-packages/ngdoc'),
   require('dgeni-packages/nunjucks'),
-  require('dgeni-packages/examples')
+  require('dgeni-packages/examples'),
+  require('dgeni-packages/git')
 ])
 
 
 .factory(require('./services/errorNamespaceMap'))
 .factory(require('./services/getMinerrInfo'))
 .factory(require('./services/getVersion'))
-.factory(require('./services/gitData'))
 
 .factory(require('./services/deployments/debug'))
 .factory(require('./services/deployments/default'))
 .factory(require('./services/deployments/jquery'))
+.factory(require('./services/deployments/test'))
 .factory(require('./services/deployments/production'))
 
 .factory(require('./inline-tag-defs/type'))
-
 
 .processor(require('./processors/error-docs'))
 .processor(require('./processors/index-page'))
 .processor(require('./processors/keywords'))
 .processor(require('./processors/pages-data'))
 .processor(require('./processors/versions-data'))
+.processor(require('./processors/sitemap'))
 
 
 .config(function(dgeni, log, readFilesProcessor, writeFilesProcessor) {
@@ -43,7 +44,7 @@ module.exports = new Package('angularjs', [
 
   readFilesProcessor.basePath = path.resolve(__dirname,'../..');
   readFilesProcessor.sourceFiles = [
-    { include: 'src/**/*.js', basePath: 'src' },
+    { include: 'src/**/*.js', exclude: 'src/angular.bind.js', basePath: 'src' },
     { include: 'docs/content/**/*.ngdoc', basePath: 'docs/content' }
   ];
 
@@ -53,8 +54,12 @@ module.exports = new Package('angularjs', [
 
 
 .config(function(parseTagsProcessor) {
+  parseTagsProcessor.tagDefinitions.push(require('./tag-defs/deprecated')); // this will override the jsdoc version
   parseTagsProcessor.tagDefinitions.push(require('./tag-defs/tutorial-step'));
   parseTagsProcessor.tagDefinitions.push(require('./tag-defs/sortOrder'));
+  parseTagsProcessor.tagDefinitions.push(require('./tag-defs/installation'));
+  parseTagsProcessor.tagDefinitions.push(require('./tag-defs/this'));
+
 })
 
 
@@ -64,7 +69,11 @@ module.exports = new Package('angularjs', [
 
 
 .config(function(templateFinder, renderDocsProcessor, gitData) {
-  templateFinder.templateFolders.unshift(path.resolve(packagePath, 'templates'));
+  // We are completely overwriting the folders
+  templateFinder.templateFolders.length = 0;
+  templateFinder.templateFolders.unshift(path.resolve(packagePath, 'templates/examples'));
+  templateFinder.templateFolders.unshift(path.resolve(packagePath, 'templates/ngdoc'));
+  templateFinder.templateFolders.unshift(path.resolve(packagePath, 'templates/app'));
   renderDocsProcessor.extraData.git = gitData;
 })
 
@@ -87,15 +96,12 @@ module.exports = new Package('angularjs', [
     docTypes: ['overview', 'tutorial'],
     getPath: function(doc) {
       var docPath = path.dirname(doc.fileInfo.relativePath);
-      if ( doc.fileInfo.baseName !== 'index' ) {
+      if (doc.fileInfo.baseName !== 'index') {
         docPath = path.join(docPath, doc.fileInfo.baseName);
       }
       return docPath;
     },
-    getOutputPath: function(doc) {
-      return 'partials/' + doc.path +
-          ( doc.fileInfo.baseName === 'index' ? '/index.html' : '.html');
-    }
+    outputPathTemplate: 'partials/${path}.html'
   });
 
   computePathsProcessor.pathTemplates.push({
@@ -106,10 +112,20 @@ module.exports = new Package('angularjs', [
 
   computePathsProcessor.pathTemplates.push({
     docTypes: ['indexPage'],
-    getPath: function() {},
+    pathTemplate: '.',
     outputPathTemplate: '${id}.html'
   });
 
+  computePathsProcessor.pathTemplates.push({
+    docTypes: ['module'],
+    pathTemplate: '${area}/${name}',
+    outputPathTemplate: 'partials/${area}/${name}.html'
+  });
+  computePathsProcessor.pathTemplates.push({
+    docTypes: ['componentGroup'],
+    pathTemplate: '${area}/${moduleName}/${groupType}',
+    outputPathTemplate: 'partials/${area}/${moduleName}/${groupType}.html'
+  });
 
   computeIdsProcessor.idTemplates.push({
     docTypes: ['overview', 'tutorial', 'e2e-test', 'indexPage'],
@@ -118,10 +134,23 @@ module.exports = new Package('angularjs', [
   });
 
   computeIdsProcessor.idTemplates.push({
-    docTypes: ['error', 'errorNamespace'],
+    docTypes: ['error'],
+    getId: function(doc) { return 'error:' + doc.namespace + ':' + doc.name; },
+    getAliases: function(doc) { return [doc.name, doc.namespace + ':' + doc.name, doc.id]; }
+  },
+  {
+    docTypes: ['errorNamespace'],
     getId: function(doc) { return 'error:' + doc.name; },
     getAliases: function(doc) { return [doc.id]; }
-  });
+  }
+  );
+})
+
+.config(function(checkAnchorLinksProcessor) {
+  checkAnchorLinksProcessor.base = '/';
+  checkAnchorLinksProcessor.errorOnUnmatchedLinks = true;
+  // We are only interested in docs that have an area (i.e. they are pages)
+  checkAnchorLinksProcessor.checkDoc = function(doc) { return doc.area; };
 })
 
 
@@ -130,12 +159,14 @@ module.exports = new Package('angularjs', [
   generateProtractorTestsProcessor,
   generateExamplesProcessor,
   debugDeployment, defaultDeployment,
-  jqueryDeployment, productionDeployment) {
+  jqueryDeployment, testDeployment,
+  productionDeployment) {
 
   generateIndexPagesProcessor.deployments = [
     debugDeployment,
     defaultDeployment,
     jqueryDeployment,
+    testDeployment,
     productionDeployment
   ];
 
@@ -144,10 +175,16 @@ module.exports = new Package('angularjs', [
     jqueryDeployment
   ];
 
+  generateProtractorTestsProcessor.basePath = 'build/docs/';
+
   generateExamplesProcessor.deployments = [
     debugDeployment,
     defaultDeployment,
     jqueryDeployment,
     productionDeployment
   ];
+})
+
+.config(function(generateKeywordsProcessor) {
+  generateKeywordsProcessor.docTypesToIgnore = ['componentGroup'];
 });
